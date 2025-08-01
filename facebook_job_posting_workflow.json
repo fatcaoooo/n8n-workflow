@@ -1,0 +1,355 @@
+```json
+{
+  "name": "Facebook Job Posting Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7,21 * * MON-THU"
+            }
+          ]
+        }
+      },
+      "id": "1",
+      "name": "Cron Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": "{{$credentials.googleSheetId}}",
+        "sheetName": "Sheet1",
+        "range": "A:P",
+        "options": {
+          "useFirstRowAsHeaders": true
+        }
+      },
+      "id": "2",
+      "name": "Read Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 3,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const pendingPosts = items.filter(item => {\n  return item.json.status === 'pending' && checkPostingTime(item.json);\n}).sort((a, b) => b.json.urgency === 'urgent' ? 1 : -1);\n\nfunction checkPostingTime(jobData) {\n  const now = new Date();\n  const currentHour = now.getHours();\n  const currentDay = now.getDay();\n  const skipWeekend = !['retail', 'service', 'healthcare'].includes(jobData.industry);\n  if (skipWeekend && (currentDay === 0 || currentDay === 6)) {\n    return false;\n  }\n  const optimalHours = {\n    'IT': [7, 9, 21],\n    'default': [8, 12, 17, 20]\n  };\n  const industryHours = optimalHours[jobData.industry] || optimalHours.default;\n  return industryHours.includes(currentHour);\n}\nreturn pendingPosts;"
+      },
+      "id": "3",
+      "name": "Filter Pending Posts",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const splitIntoGroups = () => {\n  const job = $json;\n  const groupIds = job.target_groups ? job.target_groups.split(',').map(id => id.trim()) : [];\n  const groupNames = job.group_names ? job.group_names.split(',').map(name => name.trim()) : [];\n  const postingTimes = job.posting_times ? job.posting_times.split(',').map(time => time.trim()) : ['07:00'];\n  const posts = [];\n  groupIds.forEach((groupId, index) => {\n    const targetTime = postingTimes[index] || postingTimes[0];\n    const [hour, minute] = targetTime.split(':').map(Number);\n    const now = new Date();\n    const timeDiff = Math.abs(now.getHours() - hour) * 60 + Math.abs(now.getMinutes() - minute);\n    if (timeDiff <= 5) {\n      posts.push({\n        json: {\n          ...job,\n          current_group_id: groupId,\n          current_group_name: groupNames[index] || groupNames[0] || 'Unknown Group',\n          posting_time: targetTime,\n          post_index: index,\n          total_groups: groupIds.length\n        }\n      });\n    }\n  });\n  return posts;\n};\nreturn splitIntoGroups();"
+      },
+      "id": "4",
+      "name": "Split Into Groups",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.poster_url}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "5",
+      "name": "Download Poster Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const createGroupOptimizedPrompt = (data) => {\n  const groupStyles = {\n    'react': {\n      keywords: 'ReactJS, Frontend, JavaScript, TypeScript',\n      tone: 'technical, code-focused',\n      hashtags: '#ReactJS #Frontend #JavaScript #TypeScript'\n    },\n    'it': {\n      keywords: 'IT Jobs, Tech Career, Software Development',\n      tone: 'professional tech',\n      hashtags: '#ITJobs #TechCareer #Developer'\n    }\n  };\n  const detectGroupType = (groupName) => {\n    const name = groupName.toLowerCase();\n    if (name.includes('react') || name.includes('frontend')) return 'react';\n    return 'it';\n  };\n  const groupType = detectGroupType(data.current_group_name);\n  const style = groupStyles[groupType];\n  const urgencyText = data.urgency === 'urgent' ? 'TUYỂN GẤP - ' : '';\n  const seoKeywords = [\n    data.job_title,\n    data.industry,\n    data.location,\n    `tuyển dụng ${data.job_level}`,\n    `việc làm ${data.industry}`,\n    data.key_skills.split(',').map(s => s.trim())\n  ].flat();\n  const levelMapping = {\n    'senior': 'Senior (3-5 năm kinh nghiệm)'\n  };\n  const toneStyles = {\n    'energetic': 'năng động, trẻ trung, nhiều emoji'\n  };\n  const prompt = `Bạn là chuyên gia Content Marketing và SEO tuyển dụng. Viết bài đăng Facebook thu hút ứng viên theo chuẩn SEO và tâm lý học.\n\n**THÔNG TIN TUYỂN DỤNG:**\n- Vị trí: ${urgencyText}${data.job_title}\n- Công ty: ${data.company_name}\n- Mức lương: ${data.salary_range} VNĐ/tháng\n- Địa điểm: ${data.location}\n- Cấp bậc: ${levelMapping[data.job_level] || data.job_level}\n- Kỹ năng chính: ${data.key_skills}\n- Phúc lợi: ${data.benefits}\n- Liên hệ: ${data.contact_info}\n- Ghi chú: ${data.special_notes || 'Không có'}\n\n**OPTIMIZATION CHO GROUP:**\n- Group: ${data.current_group_name}\n- Style: ${style.tone}\n- Keywords chính: ${style.keywords}\n- Hashtags: ${style.hashtags}\n\n**YÊU CẦU VIẾT BÀI:**\n1. **SEO OPTIMIZATION:**\n   - Từ khóa chính: \"${data.job_title} ${data.location}\"\n   - Từ khóa phụ: ${seoKeywords.slice(0,5).join(', ')}\n   - Hashtags: ${style.hashtags} #${data.job_title.replace(/\\s+/g, '')} #${data.location.replace(/\\s+/g, '')} #TuyenDung${data.industry}\n2. **TÂM LÝ HỌC MARKETING:**\n   - Hook: Tạo FOMO\n   - Pain Point: Nói đúng nỗi đau của ứng viên\n   - Solution: Công ty giải quyết vấn đề\n   - Urgency: Tạo cảm giác cần ứng tuyển ngay\n3. **CẤU TRÚC CONTENT:**\n   - HOOK (1-2 dòng)\n   - PROBLEM (2-3 dòng)\n   - SOLUTION (3-4 dòng)\n   - BENEFITS (4-5 dòng)\n   - REQUIREMENTS (2-3 dòng)\n   - CTA (1-2 dòng)\n   - HASHTAGS\n4. **GIỌNG ĐIỆU:** ${toneStyles[data.tone]}\n5. **KỸ THUẬT VIẾT:**\n   - Sử dụng số liệu cụ thể\n   - Emoji phù hợp\n   - Câu ngắn\n   - Độ dài: 180-250 từ\n**VIẾT NGAY:**`;\n  return prompt;\n};\n\nconst generateHashtags = (jobData) => {\n  const primary = `#${jobData.job_title.replace(/\\s+/g, '')}`;\n  const location = `#${jobData.location.replace(/\\s+/g, '')}`;\n  const industry = `#TuyenDung${jobData.industry}`;\n  const level = `#${jobData.job_level}Jobs`;\n  const skills = jobData.key_skills.split(',').slice(0,2).map(skill => `#${skill.trim().replace(/\\s+/g, '')}`);\n  return [primary, location, industry, level, ...skills, '#ViecLam', '#TuyenDung'].join(' ');\n};\n\nconst groupPrompt = createGroupOptimizedPrompt($json);\nreturn {\n  json: {\n    ...$json,\n    ai_prompt: groupPrompt,\n    hashtags: generateHashtags($json),\n    row_number: $itemIndex + 2\n  }\n};"
+      },
+      "id": "6",
+      "name": "SEO Prompt Generator",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$credentials.groqApi.apiKey}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ {\n  \"model\": \"llama3-70b-8192\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Bạn là chuyên gia tuyển dụng và SEO, viết content Facebook thu hút ứng viên theo chuẩn SEO. Luôn trả lời bằng tiếng Việt.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": $json.ai_prompt\n    }\n  ],\n  \"max_tokens\": 800,\n  \"temperature\": 0.8\n} }}"
+      },
+      "id": "7",
+      "name": "Groq API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "try {\n  const aiResponse = $json.choices[0].message.content;\n  if (!aiResponse || aiResponse.length < 50) {\n    throw new Error('AI response too short');\n  }\n  const cleanContent = aiResponse\n    .replace(/\\*\\*(.*?)\\*\\*/g, '$1')\n    .replace(/\\*(.*?)\\*/g, '$1')\n    .trim();\n  return {\n    json: {\n      ...$input.first().json,\n      post_content: cleanContent + '\\n\\n' + $input.first().json.hashtags,\n      ai_generated: true,\n      generation_timestamp: new Date().toISOString()\n    }\n  };\n} catch (error) {\n  const fallbackContent = `🔥 TUYỂN DỤNG: ${$input.first().json.job_title} 🔥\\n\\n🏢 Công ty: ${$input.first().json.company_name}\\n💰 Lương: ${$input.first().json.salary_range} VNĐ\\n📍 Địa điểm: ${$input.first().json.location}\\n\\n✅ Yêu cầu: ${$input.first().json.key_skills}\\n🎁 Phúc lợi: ${$input.first().json.benefits}\\n\\n📞 Liên hệ ngay: ${$input.first().json.contact_info}\\n\\n${$input.first().json.hashtags}`;\n  return {\n    json: {\n      ...$input.first().json,\n      post_content: fallbackContent,\n      ai_generated: false,\n      ai_error: error.message,\n      generation_timestamp: new Date().toISOString()\n    }\n  };\n}"
+      },
+      "id": "8",
+      "name": "Process AI Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const addSmartDelay = async () => {\n  const delays = [30, 45, 60, 90];\n  const randomDelay = delays[Math.floor(Math.random() * delays.length)];\n  await new Promise(resolve => setTimeout(resolve, randomDelay * 1000));\n  return $json;\n};\nreturn await addSmartDelay();"
+      },
+      "id": "9",
+      "name": "Smart Delay",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.facebook.com/v18.0/{{$json.current_group_id}}/feed",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$credentials.facebookPageApi.accessToken}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "={{$json.post_content}}"
+            },
+            {
+              "name": "link",
+              "value": "={{$json.poster_url}}"
+            },
+            {
+              "name": "published",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "bodyContentType": "multipart-form-data"
+        }
+      },
+      "id": "10",
+      "name": "Post to Facebook Group",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $json;\nconst jobData = $input.first().json;\nif (response.id) {\n  const postedGroups = jobData.posted_groups ? jobData.posted_groups.split(',') : [];\n  postedGroups.push(jobData.current_group_name);\n  const totalGroups = jobData.total_groups || 1;\n  const isComplete = postedGroups.length >= totalGroups;\n  return {\n    json: {\n      ...jobData,\n      facebook_post_id: response.id,\n      post_url: `https://facebook.com/${response.id}`,\n      posted_groups: postedGroups.join(','),\n      status: isComplete ? 'posted' : 'posting',\n      posted_date: new Date().toISOString(),\n      completion_percentage: Math.round((postedGroups.length / totalGroups) * 100)\n    }\n  };\n} else {\n  return {\n    json: {\n      ...jobData,\n      status: 'error',\n      error_message: JSON.stringify(response),\n      posted_date: new Date().toISOString(),\n      success: false\n    }\n  };\n}"
+      },
+      "id": "11",
+      "name": "Process Group Posting",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2440, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": "{{$credentials.googleSheetId}}",
+        "sheetName": "Sheet1",
+        "range": "O{{$json.row_number}}:R{{$json.row_number}}",
+        "options": {
+          "valueInputOption": "RAW"
+        },
+        "dataToSend": "defineBeforeMapping",
+        "values": {
+          "values": [
+            [
+              "={{$json.status}}",
+              "={{$json.posted_date || ''}}",
+              "={{$json.facebook_post_id || ''}}",
+              "={{$json.post_url || ''}}"
+            ]
+          ]
+        }
+      },
+      "id": "12",
+      "name": "Update Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 3,
+      "position": [2660, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "if ($json.error || !$json.id) {\n  console.error('Facebook posting error:', $json);\n  return {\n    json: {\n      error: true,\n      message: 'Failed to post to Facebook',\n      details: $json\n    }\n  };\n}\nreturn $json;"
+      },
+      "id": "13",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2880, 300]
+    }
+  ],
+  "connections": {
+    "Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Filter Pending Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Pending Posts": {
+      "main": [
+        [
+          {
+            "node": "Split Into Groups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Into Groups": {
+      "main": [
+        [
+          {
+            "node": "Download Poster Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Poster Image": {
+      "main": [
+        [
+          {
+            "node": "SEO Prompt Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEO Prompt Generator": {
+      "main": [
+        [
+          {
+            "node": "Groq API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq API Call": {
+      "main": [
+        [
+          {
+            "node": "Process AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process AI Response": {
+      "main": [
+        [
+          {
+            "node": "Smart Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Smart Delay": {
+      "main": [
+        [
+          {
+            "node": "Post to Facebook Group",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to Facebook Group": {
+      "main": [
+        [
+          {
+            "node": "Process Group Posting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Group Posting": {
+      "main": [
+        [
+          {
+            "node": "Update Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
+```
